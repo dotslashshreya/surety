@@ -20,7 +20,7 @@ Surety is a Uniswap v4 hook (UHI11) in which curators manage the hook's liquidit
 | M3 TWAP + scoring: accumulator, fee-growth benchmark | done |
 | M4 Enforcement + settlement: slash, perf fee, in-swap trigger, reallocation, reward | done |
 | M5 Drawdown breaker (freeze, never slash), full-range anchor | done |
-| M6 Invariant suite, attack tests, gas snapshot | next |
+| M6 Deposit pricing fix, invariant suite, attack and fuzz tests, gas table | done (static analysis pending) |
 | M7 Testnet deploy, curator scripts, frontend, video | — |
 
 ## Layout
@@ -32,8 +32,8 @@ src/libraries/TwapLib.sol   tick accumulator + small observation ring
 src/libraries/ScoreLib.sol  valuation and the full-range benchmark
 src/libraries/SuretyMath.sol  linked library: tick maths, position valuation, benchmark
                             (keeps SuretyHook under the 24 KB deploy limit)
-test/                       ScoreLib unit tests, vault/curator tests, settlement scenarios,
-                            breaker and anchor tests
+test/                       see "Tests" below
+snapshots/surety-gas.json   gas figures behind the table below
 ```
 
 ## Benchmark
@@ -45,6 +45,56 @@ B = V0·√(P1/P0) + L_b·(Δg0·P1 + Δg1) / 2^128,   L_b = V0 / (2·√P0)
 Δg0 and Δg1 are the changes in `feeGrowthGlobal` over the epoch. A full-range position's boundary ticks are never crossed, so its fee growth inside equals the change in the global figure. *We measure skill, not market direction.*
 
 Rounding always favours depositors: curator value rounds down and the benchmark rounds up. Deposits get shares rounded down, and withdrawals are paid in kind, rounded down.
+
+Queued deposits are priced at the 5-minute TWAP when `settle()` processes them, not at the epoch-long mark. After a late trend the mark overvalues one token, and a one-sided deposit of it would otherwise dilute everyone else.
+
+## Tests
+
+60 tests, all passing (`forge test`):
+
+| Suite | What it shows |
+|---|---|
+| `ScoreLib.t.sol` | Benchmark maths against a hand calculation and against a real full-range position |
+| `SuretyVault.t.sol` | Vault core, queues, curators, guardrails, capital cap, exit and bond lock |
+| `SuretySettlement.t.sol` | TWAP, in-swap enforcement, slashing, performance fees, reallocation, settle reward |
+| `SuretyBreaker.t.sol` | Shock alone doesn't freeze (TWAP lag); exact 5% threshold; 12 s throttle; freeze, then slash, then re-arm; anchor keeps the pool liquid with every curator frozen |
+| `SuretyAttacks.t.sol` | Each attack ends with the attacker no better off (see below) |
+| `SuretyFuzz.t.sol` | Deposit then withdraw never returns more than went in; any range move is value-neutral |
+| `SuretyInvariant.t.sol` | 7 invariants over 7,680 random actions per run (deposits, withdrawals, claims, swaps, time, range moves, settlements) |
+| `SuretyGas.t.sol` | The gas table below |
+
+**Attacks, each ending with the attacker no better off:**
+
+| Attack | Defence | Test |
+|---|---|---|
+| Wash-trade through your own range | You pay every swap fee and get back at most 20% of the excess; depositors keep the rest | `test_washTrading_curatorEndsPoorer` |
+| Push the price at the epoch boundary | Scores use the epoch-long TWAP: a 12 s push moves the score by under 0.5% | `test_boundaryPush_barelyMovesScore_attackerPoorer` |
+| Push the price to trip a rival's breaker | The breaker only freezes, and a frozen curator's benchmark stops earning fees at the freeze | `test_griefing_freezeDoesNotCostRivalTheFees_attackerLoses` |
+| Deposit only the token a stale price overvalues | Deposits are priced at the 5-minute TWAP at settlement | `test_depositTiming_oneSidedDepositAfterTrendDoesNotPay` |
+| Sandwich the reallocation | `settle()` refuses to add liquidity while spot is more than about 5% from the 5-minute TWAP | `test_sandwichReallocation_blockedBySpotGuard` |
+| Empty the pool, then set a fake price for free | The full-range anchor is never frozen, so moving the price always costs real money | `test_allCuratorsFrozen_poolStillHasLiquidity` |
+
+**Invariants:**
+1. ERC-6909 claims equal the books.
+2. The ERC20 balance equals queued deposits plus unclaimed withdrawals.
+3. Bonds never increase.
+4. The breaker never changes a bond.
+5. Settlement happens at most once per epoch.
+6. Capital stays within k × bond after reallocation.
+7. The epoch clock stays consistent.
+
+## Gas
+
+Each figure is the gas of one call, measured cold as in a real transaction. The baseline is the same swap through an identical pool with no hook.
+
+| Path | Gas | How often |
+|---|---|---|
+| Swap, no hook (baseline) | 121,167 | — |
+| **Swap, breaker check skipped** | **150,506** | almost every swap |
+| Swap that runs the breaker check | 289,784 | at most once every 12 s |
+| Swap that ends an epoch (scoring, slashing, fees) | 570,679 | once per epoch |
+| Swap that trips the breaker | 436,888 | rare |
+| `settle()` with reallocation | 591,126 | once per epoch, paid from slashed bonds |
 
 ## Build and test
 
@@ -58,6 +108,6 @@ Compiling with `via_ir` takes a few minutes. Tests use `vm.getBlockTimestamp()` 
 ## Known limitations
 
 - Losses beyond a curator's bond are not covered. The `k × bond` capital cap keeps the bond meaningful relative to the slice, and the breaker trips at 5%, half the bond's 10% coverage, so only a sudden gap move gets past both.
-- Deposits are priced at the previous epoch's TWAP, so a depositor can gain slightly when spot diverges from it at the boundary.
+- `settle()` still adds liquidity anywhere inside a band of about 5% around the 5-minute TWAP, so a sandwich within that band is bounded but not impossible. Moving the price that far against the pool's liquidity, anchor included, costs the attacker fees and price impact.
 
 Future work: multi-pool support, yield-bearing bonds, governance over parameters.

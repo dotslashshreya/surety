@@ -86,7 +86,7 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         uint256 dep0;
         uint256 dep1;
         uint256 withdrawShares;
-        uint160 sqrtPrice; // mark price the batch was processed at
+        uint160 sqrtPrice; // short-TWAP price the batch was processed at
         uint256 sharesMinted;
         uint256 out0;
         uint256 out1;
@@ -654,7 +654,7 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         }
 
         // 2. Queued withdrawals, then deposits.
-        if (closedBatch != 0) _processBatch(closedBatch, mark);
+        if (closedBatch != 0) _processBatch(closedBatch);
 
         // 3. Performance shift: δ of the worst curator's capital goes to the best.
         if (shiftFrom != NONE && curators[shiftFrom].active && curators[shiftTo].active) {
@@ -704,7 +704,7 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         reallocPending = false;
     }
 
-    function _processBatch(uint256 id, uint160 mark) internal {
+    function _processBatch(uint256 id) internal {
         Batch storage b = batches[id];
 
         // Withdrawals: in kind and pro rata from every slice and the reserve, so no price is needed.
@@ -730,12 +730,15 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
             poolKey.currency1.take(poolManager, address(this), out1, false);
         }
 
-        // Deposits: priced at the mark (the previous epoch's TWAP), rounded down.
+        // Deposits: priced at the short TWAP now, not at the epoch mark. The mark is the average of an epoch that
+        // has ended, so after a trend it can overvalue one token, and a one-sided deposit of that token would dilute
+        // everyone else. settle() already requires spot to be near the short TWAP. Rounded down.
         uint256 minted;
+        uint160 px = SuretyMath.sqrtAtTick(twap.meanTick(config.shortTwapWindow));
         if (b.dep0 > 0 || b.dep1 > 0) {
-            uint256 depValue = ScoreLib.value(b.dep0, b.dep1, mark);
+            uint256 depValue = ScoreLib.value(b.dep0, b.dep1, px);
             uint256 supply = shares.totalSupply();
-            uint256 nav = _nav(mark);
+            uint256 nav = _nav(px);
             minted = (supply == 0 || nav == 0) ? depValue : FullMath.mulDiv(depValue, supply, nav);
             poolKey.currency0.settle(poolManager, address(this), b.dep0, false);
             poolKey.currency1.settle(poolManager, address(this), b.dep1, false);
@@ -744,7 +747,7 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
             if (minted > 0) shares.mint(address(this), minted);
         }
         b.sharesMinted = minted;
-        b.sqrtPrice = mark;
+        b.sqrtPrice = px;
         b.processed = true;
         closedBatch = 0;
         emit BatchProcessed(id, minted, burned, b.out0, b.out1);

@@ -37,6 +37,11 @@ contract SuretyHookHarness is SuretyHook {
         return _liveScore(i, SuretyMath.sqrtAtTick(TwapLib.meanTick(twap, config.shortTwapWindow)), fg0, fg1);
     }
 
+    /// @dev Depositor-owned value at any price (the production view uses the epoch mark).
+    function navAt(uint160 sqrtP) external view returns (uint256) {
+        return _nav(sqrtP);
+    }
+
     function pendingShift() external view returns (uint8 from, uint8 to) {
         return (shiftFrom, shiftTo);
     }

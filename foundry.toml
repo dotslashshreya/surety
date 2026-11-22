@@ -14,3 +14,11 @@ optimizer_runs = 1
 [lint]
 exclude_lints = ["screaming-snake-case-immutable", "screaming-snake-case-const"]
 lint_on_build = false
+
+[invariant]
+runs = 64
+depth = 120
+fail_on_revert = false
+
+[fuzz]
+runs = 256
