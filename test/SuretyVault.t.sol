@@ -167,7 +167,8 @@ contract SuretyVaultTest is SuretyBase {
         _register(careful, 5 ether, -6000, 6000); // cap = 50
         _roll();
         assertApproxEqAbs(hook.sliceValue(0, hook.markSqrtPrice()), 50 ether, 10, "slice capped at k x bond");
-        assertApproxEqAbs(hook.reserve0() + hook.reserve1(), 150 ether, 10, "rest stays in reserve");
+        assertApproxEqAbs(hook.totalValue() - hook.sliceValue(0, hook.markSqrtPrice()), 150 ether, 10, "rest stays with depositors");
+        assertGt(hook.anchorLiquidity(), 0, "and sits full range in the anchor, not idle");
         _assertClaimsMatch();
     }
 

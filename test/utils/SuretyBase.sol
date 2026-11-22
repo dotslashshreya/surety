@@ -50,6 +50,9 @@ abstract contract SuretyBase is BaseTest {
             maxRebalances: 3,
             shortTwapWindow: 5 minutes,
             maxSpotDeviation: 500,
+            breakerBps: 500,
+            breakerInterval: 12,
+            anchorBps: 1000,
             minBond: 1 ether,
             maxSettleReward: 10 ether
         });

@@ -20,10 +20,10 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {TransientStateLibrary} from "@uniswap/v4-core/src/libraries/TransientStateLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 
 import {TwapLib} from "./libraries/TwapLib.sol";
 import {ScoreLib} from "./libraries/ScoreLib.sol";
+import {SuretyMath} from "./libraries/SuretyMath.sol";
 
 /// @title SuretyHook
 /// @notice A Uniswap v4 hook that owns all of one pool's liquidity and lets bonded curators manage slices of it.
@@ -53,6 +53,9 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         uint8 maxRebalances; // R: setRange calls per curator per epoch
         uint32 shortTwapWindow; // window for the setRange guardrail and the settlement deviation guard
         int24 maxSpotDeviation; // max |spot tick - short TWAP tick| allowed when the hook moves liquidity
+        uint16 breakerBps; // X: freeze a slice once it is this far below its benchmark mid-epoch
+        uint32 breakerInterval; // run the breaker check at most once per this many seconds
+        uint16 anchorBps; // share of depositor capital always kept in the hook's own full-range position
         uint256 minBond; // in token1
         uint256 maxSettleReward; // in token1, per settle() call
     }
@@ -61,7 +64,8 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         address owner;
         bool active; // holds a slice
         bool exiting;
-        bool frozen; // set by the M5 breaker; reserved
+        bool frozen; // liquidity pulled by the breaker this epoch
+        bool needsRearm; // was frozen; gets no capital until it calls setRange again
         int24 tickLower;
         int24 tickUpper;
         uint8 rebalances;
@@ -73,6 +77,8 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         uint256 idle1;
         uint256 v0; // slice value at the epoch's mark price, adjusted for capital moved in or out
         int256 lastExcess;
+        uint256 fg0Freeze; // pool fee growth when frozen: the benchmark stops earning fees here
+        uint256 fg1Freeze;
     }
 
     /// @dev Deposits and withdrawals queue into a batch that is closed at an epoch boundary and processed by settle().
@@ -131,11 +137,15 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
     bool public reallocPending;
     uint8 internal shiftFrom = NONE;
     uint8 internal shiftTo = NONE;
+    uint32 public lastBreakerCheck;
 
     // Vault balances (ERC-6909 claims held by the hook)
     uint256 public reserve0; // depositor capital not allocated to any slice, incl. slashed bonds
     uint256 public reserve1;
     uint256 public rewardPool; // token1 set aside for settle() callers
+    /// @dev Depositor capital the hook holds full range itself (salt 3). It is never frozen, so the pool is never empty
+    ///      and moving the price always costs real money, which makes a fake price impossible to hold for free.
+    uint128 public anchorLiquidity;
 
     // Queues
     uint256 public openBatch = 1;
@@ -219,7 +229,7 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         poolBound = true;
         poolKey = key;
 
-        twap.initialize(TickMath.getTickAtSqrtPrice(sqrtPriceX96));
+        twap.initialize(SuretyMath.tickAtSqrt(sqrtPriceX96));
         epochId = 1;
         epochStart = uint32(block.timestamp);
         epochEnd = uint32(block.timestamp) + config.epochLength;
@@ -263,7 +273,55 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
     {
         (, int24 tick,,) = poolManager.getSlot0(_poolId());
         twap.update(tick);
+        // Throttled: the short TWAP barely moves within a few seconds, so most swaps skip the check entirely.
+        if (block.timestamp >= uint256(lastBreakerCheck) + config.breakerInterval) {
+            lastBreakerCheck = uint32(block.timestamp);
+            _checkBreaker();
+        }
         return (BaseHook.afterSwap.selector, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Drawdown breaker: freeze, never slash
+    // ------------------------------------------------------------------
+
+    /// @dev Mid-epoch check of each live slice against its benchmark, both marked at the short TWAP (never spot).
+    ///      A slice more than X below is pulled out of the pool and parked idle until settlement. Nothing is slashed
+    ///      here, because mid-epoch prices can be pushed around. The slash comes at settlement, at the epoch-long TWAP.
+    ///      Runs inside afterSwap, where the PoolManager is already unlocked, so liquidity can be removed directly.
+    function _checkBreaker() internal {
+        uint160 sqrtNow = SuretyMath.sqrtAtTick(twap.meanTick(config.shortTwapWindow));
+        (uint256 fg0, uint256 fg1) = poolManager.getFeeGrowthGlobals(_poolId());
+        bool froze;
+        for (uint8 i; i < MAX_CURATORS; i++) {
+            Curator storage c = curators[i];
+            if (!c.active || c.frozen || c.liquidity == 0 || c.v0 == 0) continue;
+            (uint256 v, uint256 b) = _liveScore(i, sqrtNow, fg0, fg1);
+            if (v * BPS >= b * (BPS - config.breakerBps)) continue;
+            _withdrawToIdle(i, c.liquidity);
+            c.frozen = true;
+            c.fg0Freeze = fg0;
+            c.fg1Freeze = fg1;
+            froze = true;
+            emit CuratorFrozen(epochId, c.owner);
+        }
+        if (froze) _settleDeltas();
+    }
+
+    /// @dev Slice value and benchmark so far this epoch, both at `sqrtNow`.
+    function _liveScore(uint8 i, uint160 sqrtNow, uint256 fg0, uint256 fg1)
+        internal
+        view
+        returns (uint256 v, uint256 b)
+    {
+        v = _sliceValue(i, sqrtNow);
+        uint256 dg0;
+        uint256 dg1;
+        unchecked {
+            dg0 = fg0 - fg0Start;
+            dg1 = fg1 - fg1Start;
+        }
+        b = SuretyMath.benchmark(curators[i].v0, markSqrtPrice, sqrtNow, dg0, dg1);
     }
 
     // ------------------------------------------------------------------
@@ -354,6 +412,8 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         Curator storage c = curators[i];
         if (c.frozen) revert CuratorFrozenErr();
         _checkRange(tickLower, tickUpper);
+        // A curator frozen last epoch re-arms by choosing a fresh range. It rejoins at the next reallocation.
+        c.needsRearm = false;
 
         if (c.rebalanceEpoch != epochId) {
             c.rebalanceEpoch = epochId;
@@ -441,7 +501,7 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         {
             int56 cumEnd = twap.cumulativeAt(epochEnd);
             int24 tick1 = TwapLib.meanTickBetween(epochStartCum, cumEnd, epochEnd - epochStart);
-            sqrtP1 = TickMath.getSqrtPriceAtTick(tick1);
+            sqrtP1 = SuretyMath.sqrtAtTick(tick1);
         }
         (uint256 fg0, uint256 fg1) = poolManager.getFeeGrowthGlobals(_poolId());
         uint256 dg0;
@@ -461,7 +521,20 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
                 continue;
             }
             uint256 v1 = _sliceValue(i, sqrtP1);
-            uint256 b = ScoreLib.benchmark(c.v0, markSqrtPrice, sqrtP1, dg0, dg1);
+            uint256 b;
+            if (c.frozen) {
+                // The benchmark stops earning fees at the freeze, so a wrongful freeze costs the curator only fees it
+                // missed, never a slash. The price move is still marked over the whole epoch.
+                uint256 g0;
+                uint256 g1;
+                unchecked {
+                    g0 = c.fg0Freeze - fg0Start;
+                    g1 = c.fg1Freeze - fg1Start;
+                }
+                b = SuretyMath.benchmark(c.v0, markSqrtPrice, sqrtP1, g0, g1);
+            } else {
+                b = SuretyMath.benchmark(c.v0, markSqrtPrice, sqrtP1, dg0, dg1);
+            }
             int256 e = int256(v1) - int256(b);
             c.lastExcess = e;
             ratio[i] = (e * 1e18) / int256(c.v0);
@@ -482,6 +555,19 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
                 totalPerfFee += perfFee[i];
             }
             c.v0 = v1; // next epoch's starting value, at the new mark price
+
+            if (c.frozen) {
+                // The frozen slice is already idle, so returning it to depositors is bookkeeping only. The curator gets
+                // no capital until it re-arms with setRange.
+                reserve0 += c.idle0;
+                reserve1 += c.idle1;
+                c.idle0 = 0;
+                c.idle1 = 0;
+                c.v0 = 0;
+                c.active = false;
+                c.frozen = false;
+                c.needsRearm = true;
+            }
         }
 
         uint256 nav = _nav(sqrtP1);
@@ -544,6 +630,13 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         uint160 mark = markSqrtPrice;
         uint64 id = epochId;
 
+        // 0. Pull the anchor into the reserve; everything below is then plain reserve bookkeeping.
+        if (anchorLiquidity > 0) {
+            (int128 a0, int128 a1) = _modifyAnchor(-int256(uint256(anchorLiquidity)));
+            reserve0 += uint128(a0);
+            reserve1 += uint128(a1);
+        }
+
         // 1. Exits: slices of curators who asked to leave in an already-scored epoch return to the reserve.
         for (uint8 i; i < MAX_CURATORS; i++) {
             Curator storage c = curators[i];
@@ -553,7 +646,9 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
                 reserve1 += o1;
                 c.v0 = 0;
                 c.active = false;
-            } else if (!c.active && c.owner != address(0) && !c.exiting && c.tickUpper > c.tickLower) {
+            } else if (
+                !c.active && c.owner != address(0) && !c.exiting && !c.needsRearm && c.tickUpper > c.tickLower
+            ) {
                 c.active = true; // newly registered curators join here
             }
         }
@@ -593,10 +688,11 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         // 5. Hand the reserve out equally to active curators, within each one's cap headroom.
         _distributeReserve(mark);
 
-        // 6. Put idle tokens to work in each range.
+        // 6. Put idle tokens to work in each range, and everything left in the reserve back into full range.
         for (uint8 i; i < MAX_CURATORS; i++) {
             if (curators[i].active) _deploy(i);
         }
+        _deployAnchor();
 
         // 7. Reward the caller from slashed bonds.
         uint256 reward = rewardPool < config.maxSettleReward ? rewardPool : config.maxSettleReward;
@@ -659,9 +755,13 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         for (uint8 i; i < MAX_CURATORS; i++) {
             if (curators[i].active) n++;
         }
-        if (n == 0 || (reserve0 == 0 && reserve1 == 0)) return;
-        uint256 share0 = reserve0 / n;
-        uint256 share1 = reserve1 / n;
+        if (n == 0) return;
+        // Only what's above the anchor's share of NAV goes to curators.
+        uint256 rv = ScoreLib.value(reserve0, reserve1, mark);
+        uint256 target = FullMath.mulDiv(_nav(mark), config.anchorBps, BPS);
+        if (rv <= target) return;
+        uint256 share0 = FullMath.mulDiv(reserve0, rv - target, rv * n);
+        uint256 share1 = FullMath.mulDiv(reserve1, rv - target, rv * n);
         uint256 shareValue = ScoreLib.value(share0, share1, mark);
         if (shareValue == 0) return;
         for (uint8 i; i < MAX_CURATORS; i++) {
@@ -692,19 +792,32 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
     ///      Returns the principal delta (positive when tokens come out).
     function _modify(uint8 i, int256 liqDelta) internal returns (int128 p0, int128 p1) {
         Curator storage c = curators[i];
+        uint256 f0;
+        uint256 f1;
+        (p0, p1, f0, f1) = _modifyPos(c.tickLower, c.tickUpper, i, liqDelta);
+        c.idle0 += f0;
+        c.idle1 += f1;
+        c.liquidity = _applyDelta(c.liquidity, liqDelta);
+    }
+
+    /// @dev The one place the hook calls modifyLiquidity. Splits the result into principal and fees.
+    function _modifyPos(int24 tl, int24 tu, uint8 salt, int256 liqDelta)
+        internal
+        returns (int128 p0, int128 p1, uint256 f0, uint256 f1)
+    {
         (BalanceDelta callerDelta, BalanceDelta fees) = poolManager.modifyLiquidity(
             poolKey,
-            ModifyLiquidityParams({
-                tickLower: c.tickLower, tickUpper: c.tickUpper, liquidityDelta: liqDelta, salt: bytes32(uint256(i))
-            }),
+            ModifyLiquidityParams({tickLower: tl, tickUpper: tu, liquidityDelta: liqDelta, salt: bytes32(uint256(salt))}),
             ""
         );
-        c.idle0 += uint128(fees.amount0());
-        c.idle1 += uint128(fees.amount1());
+        f0 = uint128(fees.amount0());
+        f1 = uint128(fees.amount1());
         p0 = callerDelta.amount0() - fees.amount0();
         p1 = callerDelta.amount1() - fees.amount1();
-        if (liqDelta < 0) c.liquidity -= uint128(uint256(-liqDelta));
-        else c.liquidity += uint128(uint256(liqDelta));
+    }
+
+    function _applyDelta(uint128 liq, int256 liqDelta) internal pure returns (uint128) {
+        return liqDelta < 0 ? liq - uint128(uint256(-liqDelta)) : liq + uint128(uint256(liqDelta));
     }
 
     function _withdrawToIdle(uint8 i, uint128 liq) internal {
@@ -739,13 +852,41 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         uint256 a1 = c.idle1 > 2 ? c.idle1 - 2 : 0;
         if (a0 == 0 && a1 == 0) return;
         (uint160 sqrtP,,,) = poolManager.getSlot0(_poolId());
-        uint128 liq = LiquidityAmounts.getLiquidityForAmounts(
-            sqrtP, TickMath.getSqrtPriceAtTick(c.tickLower), TickMath.getSqrtPriceAtTick(c.tickUpper), a0, a1
-        );
+        uint128 liq = SuretyMath.liquidityFor(sqrtP, c.tickLower, c.tickUpper, a0, a1);
         if (liq == 0) return;
         (int128 p0, int128 p1) = _modify(i, int256(uint256(liq)));
         c.idle0 -= uint128(-p0);
         c.idle1 -= uint128(-p1);
+    }
+
+    /// @dev Modify the anchor. Fees it accrued go to the reserve. Returns the principal delta.
+    function _modifyAnchor(int256 liqDelta) internal returns (int128 p0, int128 p1) {
+        (int24 lo, int24 hi) = _fullRange();
+        uint256 f0;
+        uint256 f1;
+        (p0, p1, f0, f1) = _modifyPos(lo, hi, 3, liqDelta);
+        reserve0 += f0;
+        reserve1 += f1;
+        anchorLiquidity = _applyDelta(anchorLiquidity, liqDelta);
+    }
+
+    /// @dev Put the whole reserve full range (2 wei per token held back for rounding, as in _deploy).
+    function _deployAnchor() internal {
+        uint256 a0 = reserve0 > 2 ? reserve0 - 2 : 0;
+        uint256 a1 = reserve1 > 2 ? reserve1 - 2 : 0;
+        if (a0 == 0 || a1 == 0) return;
+        (uint160 sqrtP,,,) = poolManager.getSlot0(_poolId());
+        (int24 lo, int24 hi) = _fullRange();
+        uint128 liq = SuretyMath.liquidityFor(sqrtP, lo, hi, a0, a1);
+        if (liq == 0) return;
+        (int128 p0, int128 p1) = _modifyAnchor(int256(uint256(liq)));
+        reserve0 -= uint128(-p0);
+        reserve1 -= uint128(-p1);
+    }
+
+    function _fullRange() internal view returns (int24, int24) {
+        int24 s = poolKey.tickSpacing;
+        return (TickMath.minUsableTick(s), TickMath.maxUsableTick(s));
     }
 
     /// @dev Net the hook's deltas against its ERC-6909 claims at the end of every unlock.
@@ -792,32 +933,29 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
     /// @notice Value of slice `i` in token1 at `sqrtP`: position principal + uncollected fees + idle tokens.
     function _sliceValue(uint8 i, uint160 sqrtP) internal view returns (uint256) {
         Curator storage c = curators[i];
-        uint256 a0 = c.idle0;
-        uint256 a1 = c.idle1;
-        if (c.liquidity > 0) {
-            (uint256 p0, uint256 p1) = ScoreLib.amountsForLiquidity(
-                sqrtP, TickMath.getSqrtPriceAtTick(c.tickLower), TickMath.getSqrtPriceAtTick(c.tickUpper), c.liquidity
-            );
-            (uint256 f0, uint256 f1) = _feesOwed(i);
-            a0 += p0 + f0;
-            a1 += p1 + f1;
-        }
-        return ScoreLib.value(a0, a1, sqrtP);
+        if (c.liquidity == 0) return ScoreLib.value(c.idle0, c.idle1, sqrtP);
+        return _positionValue(c.tickLower, c.tickUpper, i, c.idle0, c.idle1, sqrtP);
     }
 
-    function _feesOwed(uint8 i) internal view returns (uint256 f0, uint256 f1) {
-        Curator storage c = curators[i];
-        PoolId pid = _poolId();
-        (uint128 liq, uint256 last0, uint256 last1) =
-            poolManager.getPositionInfo(pid, address(this), c.tickLower, c.tickUpper, bytes32(uint256(i)));
-        (uint256 in0, uint256 in1) = poolManager.getFeeGrowthInside(pid, c.tickLower, c.tickUpper);
-        f0 = ScoreLib.feesOwed(liq, in0, last0);
-        f1 = ScoreLib.feesOwed(liq, in1, last1);
+    /// @dev Value at `sqrtP` of the hook's position (salt), including uncollected fees, plus loose tokens.
+    function _positionValue(int24 tl, int24 tu, uint8 salt, uint256 extra0, uint256 extra1, uint160 sqrtP)
+        internal
+        view
+        returns (uint256)
+    {
+        return SuretyMath.livePositionValue(
+            poolManager, _poolId(), address(this), tl, tu, bytes32(uint256(salt)), extra0, extra1, sqrtP
+        );
     }
 
-    /// @notice Depositor-owned value: every slice plus the reserve. Bonds, rewards and queued batches are excluded.
+    /// @notice Depositor-owned value: every slice, the reserve and the anchor. Bonds, rewards and queued batches are
+    ///         excluded.
     function _nav(uint160 sqrtP) internal view returns (uint256 nav) {
         nav = ScoreLib.value(reserve0, reserve1, sqrtP);
+        if (anchorLiquidity > 0) {
+            (int24 lo, int24 hi) = _fullRange();
+            nav += _positionValue(lo, hi, 3, 0, 0, sqrtP);
+        }
         for (uint8 i; i < MAX_CURATORS; i++) {
             if (curators[i].active) nav += _sliceValue(i, sqrtP);
         }

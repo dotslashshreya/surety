@@ -69,6 +69,7 @@ contract SuretySettlementTest is SuretyBase {
         vm.warp(hook.epochEnd());
 
         // The first swap after the epoch ends runs enforcement inside beforeSwap.
+        uint256 depositorPotBefore = hook.reserve1() + hook.rewardPool();
         uint64 epochBefore = hook.epochId();
         vm.recordLogs();
         _swap(true, 0.001 ether);
@@ -81,7 +82,7 @@ contract SuretySettlementTest is SuretyBase {
         assertLt(exR, 0, "reckless underperformed the benchmark");
         assertLt(bondR, 20 ether, "reckless bond slashed");
         assertGt(exC, exR, "careful did better");
-        assertEq(20 ether - bondR + (20 ether - bondC), hook.reserve1() + hook.rewardPool(), "slash moved to depositors");
+        assertEq(20 ether - bondR + (20 ether - bondC), hook.reserve1() + hook.rewardPool() - depositorPotBefore, "slash moved to depositors");
         (uint8 from, uint8 to) = hook.pendingShift();
         assertEq(from, 1);
         assertEq(to, 0);
