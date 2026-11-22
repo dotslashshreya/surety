@@ -1,8 +1,8 @@
 {
-  "settle_enforceAndReallocate": "591126",
-  "swap_breakerCheckRuns_noTrip": "289784",
-  "swap_breakerCheckSkipped": "150506",
+  "settle_enforceAndReallocate": "591119",
+  "swap_breakerCheckRuns_noTrip": "289781",
+  "swap_breakerCheckSkipped": "150503",
   "swap_noHook_baseline": "121167",
-  "swap_runsEpochEnforcement": "570679",
-  "swap_tripsBreaker": "436888"
+  "swap_runsEpochEnforcement": "570672",
+  "swap_tripsBreaker": "436885"
 }

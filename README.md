@@ -20,7 +20,7 @@ Surety is a Uniswap v4 hook (UHI11) in which curators manage the hook's liquidit
 | M3 TWAP + scoring: accumulator, fee-growth benchmark | done |
 | M4 Enforcement + settlement: slash, perf fee, in-swap trigger, reallocation, reward | done |
 | M5 Drawdown breaker (freeze, never slash), full-range anchor | done |
-| M6 Deposit pricing fix, invariant suite, attack and fuzz tests, gas table | done (static analysis pending) |
+| M6 Deposit pricing fix, invariant suite, attack and fuzz tests, gas table, static analysis | done |
 | M7 Testnet deploy, curator scripts, frontend, video | — |
 
 ## Layout
@@ -34,6 +34,7 @@ src/libraries/SuretyMath.sol  linked library: tick maths, position valuation, be
                             (keeps SuretyHook under the 24 KB deploy limit)
 test/                       see "Tests" below
 snapshots/surety-gas.json   gas figures behind the table below
+audit/README.md             Slither results: what was fixed, and why the rest isn't a problem
 ```
 
 ## Benchmark
@@ -90,11 +91,11 @@ Each figure is the gas of one call, measured cold as in a real transaction. The 
 | Path | Gas | How often |
 |---|---|---|
 | Swap, no hook (baseline) | 121,167 | — |
-| **Swap, breaker check skipped** | **150,506** | almost every swap |
-| Swap that runs the breaker check | 289,784 | at most once every 12 s |
-| Swap that ends an epoch (scoring, slashing, fees) | 570,679 | once per epoch |
-| Swap that trips the breaker | 436,888 | rare |
-| `settle()` with reallocation | 591,126 | once per epoch, paid from slashed bonds |
+| **Swap, breaker check skipped** | **150,503** | almost every swap |
+| Swap that runs the breaker check | 289,781 | at most once every 12 s |
+| Swap that ends an epoch (scoring, slashing, fees) | 570,672 | once per epoch |
+| Swap that trips the breaker | 436,885 | rare |
+| `settle()` with reallocation | 591,119 | once per epoch, paid from slashed bonds |
 
 ## Build and test
 
@@ -104,6 +105,10 @@ forge test
 ```
 
 Compiling with `via_ir` takes a few minutes. Tests use `vm.getBlockTimestamp()` rather than `block.timestamp`, because via_ir caches the latter across `vm.warp`.
+
+## Static analysis
+
+Slither 0.11.6 on `src/`: 65 findings, 4 fixed, the other 61 explained one by one in [audit/README.md](audit/README.md). None is exploitable; the two marked High are a known false positive on modulo arithmetic.
 
 ## Known limitations
 

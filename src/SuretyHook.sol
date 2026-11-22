@@ -348,9 +348,9 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
     function requestWithdraw(uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroAmount();
         uint256 id = openBatch;
-        shares.move(msg.sender, address(this), amount);
         batches[id].withdrawShares += amount;
         requests[id][msg.sender].withdrawShares += amount;
+        shares.move(msg.sender, address(this), amount);
         emit WithdrawRequested(msg.sender, id, amount);
     }
 
@@ -571,7 +571,6 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         }
 
         uint256 nav = _nav(sqrtP1);
-        _payPerformanceFees(id, perfFee, totalPerfFee, nav);
         _pickShift(ratio);
 
         // Close the queue so the next settle() prices it at the new mark, and open the next epoch.
@@ -590,6 +589,8 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
         fg1Start = fg1;
         epochId = id + 1;
         reallocPending = true;
+        // Last: the only external call in enforcement (minting fee shares) comes after every state write.
+        _payPerformanceFees(id, perfFee, totalPerfFee, nav);
         emit EpochSettled(id, sqrtP1, nav);
         return true;
     }
@@ -723,9 +724,9 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
                 out0 += o0;
                 out1 += o1;
             }
-            shares.burn(address(this), burned);
             b.out0 = out0;
             b.out1 = out1;
+            shares.burn(address(this), burned);
             poolKey.currency0.take(poolManager, address(this), out0, false);
             poolKey.currency1.take(poolManager, address(this), out1, false);
         }
