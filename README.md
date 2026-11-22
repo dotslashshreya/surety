@@ -1,183 +1,58 @@
-# Uniswap v4 Hook Template
+# Surety
 
-**A template for writing Uniswap v4 Hooks 🦄**
+**The first LP manager who pays you back when they lose.**
 
-### Get Started
+Surety is a Uniswap v4 hook (UHI11) in which curators manage the hook's liquidity. Each curator posts a bond, and when it underperforms a passive benchmark that bond repays depositors.
 
-This template provides a starting point for writing Uniswap v4 Hooks, including a simple example and preconfigured test environment. Start by creating a new repository using the "Use this template" button at the top right of this page. Alternatively you can also click this link:
+- The hook owns all of one pool's liquidity. Each curator manages a separate slice through a guardrailed `setRange`, and can only move liquidity, never swap.
+- Every epoch, each slice is scored against a **full-range LP of the same starting value**. The benchmark is computed onchain from the pool's own fee growth, and both sides are marked at the hook's epoch-long TWAP.
+- **Enforcement runs inside the first swap after an epoch ends.** That covers scoring, slashing and performance fees, and it is bookkeeping only. Reallocation moves liquidity, so it runs from `settle()`, which anyone can call for a reward paid out of slashed bonds. There is no keeper.
+- Settlement never swaps. Liquidity is only added when spot is close to the short TWAP.
 
-[![Use this Template](https://img.shields.io/badge/Use%20this%20Template-101010?style=for-the-badge&logo=github)](https://github.com/uniswapfoundation/v4-template/generate)
+## Status
 
-1. The example hook [Counter.sol](src/Counter.sol) demonstrates the `beforeSwap()` and `afterSwap()` hooks
-2. The test template [Counter.t.sol](test/Counter.t.sol) preconfigures the v4 pool manager, test tokens, and test liquidity.
+| Milestone | State |
+|---|---|
+| M1 Vault core: hook-owned liquidity, queued deposit/withdraw | done |
+| M2 Curators: bonds, guardrailed `setRange`, exit with bond lock | done |
+| M3 TWAP + scoring: accumulator, fee-growth benchmark | done |
+| M4 Enforcement + settlement: slash, perf fee, in-swap trigger, reallocation, reward | done |
+| M5 Drawdown breaker (freeze, never slash) | next |
+| M6 Invariant suite, attack tests, gas snapshot | — |
+| M7 Testnet deploy, curator scripts, frontend, video | — |
 
-<details>
-<summary>Updating to v4-template:latest</summary>
+## Layout
 
-This template is actively maintained -- you can update the v4 dependencies, scripts, and helpers:
+```
+src/SuretyHook.sol          hook + vault + curators + settlement
+src/SuretyShares.sol        vault share token (only the hook mints/burns)
+src/libraries/TwapLib.sol   tick accumulator + small observation ring
+src/libraries/ScoreLib.sol  valuation and the full-range benchmark
+test/                       ScoreLib unit tests, vault/curator tests, settlement scenarios
+```
+
+## Benchmark
+
+```
+B = V0·√(P1/P0) + L_b·(Δg0·P1 + Δg1) / 2^128,   L_b = V0 / (2·√P0)
+```
+
+Δg0 and Δg1 are the changes in `feeGrowthGlobal` over the epoch. A full-range position's boundary ticks are never crossed, so its fee growth inside equals the change in the global figure. *We measure skill, not market direction.*
+
+Rounding always favours depositors: curator value rounds down and the benchmark rounds up. Deposits get shares rounded down, and withdrawals are paid in kind, rounded down.
+
+## Build and test
 
 ```bash
-git remote add template https://github.com/uniswapfoundation/v4-template
-git fetch template
-git merge template/main <BRANCH> --allow-unrelated-histories
-```
-
-</details>
-
-### Requirements
-
-This template is designed to work with Foundry (stable). If you are using Foundry Nightly, you may encounter compatibility issues. You can update your Foundry installation to the latest stable version by running:
-
-```
-foundryup
-```
-
-To set up the project, run the following commands in your terminal to install dependencies and run the tests:
-
-```
-forge install
+forge build --sizes   # SuretyHook must stay under 24,576 bytes
 forge test
 ```
 
-### Local Development
+Compiling with `via_ir` takes a few minutes. Tests use `vm.getBlockTimestamp()` rather than `block.timestamp`, because via_ir caches the latter across `vm.warp`.
 
-Other than writing unit tests (recommended!), you can only deploy & test hooks on [anvil](https://book.getfoundry.sh/anvil/) locally. Scripts are available in the `script/` directory, which can be used to deploy hooks, create pools, provide liquidity and swap tokens. The scripts support both local `anvil` environment as well as running them directly on a production network.
+## Known limitations
 
-### Executing locally with using **Anvil**:
+- Losses beyond a curator's bond are not covered. The `k × bond` capital cap keeps the bond meaningful relative to the slice.
+- Deposits are priced at the previous epoch's TWAP, so a depositor can gain slightly when spot diverges from it at the boundary.
 
-1. Start Anvil (or fork a specific chain using anvil):
-
-```bash
-anvil
-```
-
-or
-
-```bash
-anvil --fork-url <YOUR_RPC_URL>
-```
-
-2. Execute scripts:
-
-```bash
-forge script script/00_DeployHook.s.sol \
-    --rpc-url http://localhost:8545 \
-    --private-key <PRIVATE_KEY> \
-    --broadcast
-```
-
-### Using **RPC URLs** (actual transactions):
-
-:::info
-It is best to not store your private key even in .env or enter it directly in the command line. Instead use the `--account` flag to select your private key from your keystore.
-:::
-
-### Follow these steps if you have not stored your private key in the keystore:
-
-<details>
-
-1. Add your private key to the keystore:
-
-```bash
-cast wallet import <SET_A_NAME_FOR_KEY> --interactive
-```
-
-2. You will prompted to enter your private key and set a password, fill and press enter:
-
-```
-Enter private key: <YOUR_PRIVATE_KEY>
-Enter keystore password: <SET_NEW_PASSWORD>
-```
-
-You should see this:
-
-```
-`<YOUR_WALLET_PRIVATE_KEY_NAME>` keystore was saved successfully. Address: <YOUR_WALLET_ADDRESS>
-```
-
-::: warning
-Use `history -c` to clear your command history.
-:::
-
-</details>
-
-1. Execute scripts:
-
-```bash
-forge script script/00_DeployHook.s.sol \
-    --rpc-url <YOUR_RPC_URL> \
-    --account <YOUR_WALLET_PRIVATE_KEY_NAME> \
-    --sender <YOUR_WALLET_ADDRESS> \
-    --broadcast
-```
-
-You will prompted to enter your wallet password, fill and press enter:
-
-```
-Enter keystore password: <YOUR_PASSWORD>
-```
-
-### Key Modifications to note:
-
-1. Update the `token0` and `token1` addresses in the `BaseScript.sol` file to match the tokens you want to use in the network of your choice for sepolia and mainnet deployments.
-2. Update the `token0Amount` and `token1Amount` in the `CreatePoolAndAddLiquidity.s.sol` file to match the amount of tokens you want to provide liquidity with.
-3. Update the `token0Amount` and `token1Amount` in the `AddLiquidity.s.sol` file to match the amount of tokens you want to provide liquidity with.
-4. Update the `amountIn` and `amountOutMin` in the `Swap.s.sol` file to match the amount of tokens you want to swap.
-
-### Verifying the hook contract
-
-```bash
-forge verify-contract \
-  --rpc-url <URL> \
-  --chain <CHAIN_NAME_OR_ID> \
-  # Generally etherscan
-  --verifier <Verification_Provider> \
-  # Use --etherscan-api-key <ETHERSCAN_API_KEY> if you are using etherscan
-  --verifier-api-key <Verification_Provider_API_KEY> \
-  --constructor-args <ABI_ENCODED_ARGS> \
-  --num-of-optimizations <OPTIMIZER_RUNS> \
-  <Contract_Address> \
-  <path/to/Contract.sol:ContractName>
-  --watch
-```
-
-### Troubleshooting
-
-<details>
-
-#### Permission Denied
-
-When installing dependencies with `forge install`, Github may throw a `Permission Denied` error
-
-Typically caused by missing Github SSH keys, and can be resolved by following the steps [here](https://docs.github.com/en/github/authenticating-to-github/connecting-to-github-with-ssh)
-
-Or [adding the keys to your ssh-agent](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent#adding-your-ssh-key-to-the-ssh-agent), if you have already uploaded SSH keys
-
-#### Anvil fork test failures
-
-Some versions of Foundry may limit contract code size to ~25kb, which could prevent local tests to fail. You can resolve this by setting the `code-size-limit` flag
-
-```
-anvil --code-size-limit 40000
-```
-
-#### Hook deployment failures
-
-Hook deployment failures are caused by incorrect flags or incorrect salt mining
-
-1. Verify the flags are in agreement:
-   - `getHookCalls()` returns the correct flags
-   - `flags` provided to `HookMiner.find(...)`
-2. Verify salt mining is correct:
-   - In **forge test**: the _deployer_ for: `new Hook{salt: salt}(...)` and `HookMiner.find(deployer, ...)` are the same. This will be `address(this)`. If using `vm.prank`, the deployer will be the pranking address
-   - In **forge script**: the deployer must be the CREATE2 Proxy: `0x4e59b44847b379578588920cA78FbF26c0B4956C`
-     - If anvil does not have the CREATE2 deployer, your foundry may be out of date. You can update it with `foundryup`
-
-</details>
-
-### Additional Resources
-
-- [Uniswap v4 docs](https://docs.uniswap.org/contracts/v4/overview)
-- [v4-periphery](https://github.com/uniswap/v4-periphery)
-- [v4-core](https://github.com/uniswap/v4-core)
-- [v4-by-example](https://v4-by-example.org)
+Future work: multi-pool support, yield-bearing bonds, governance over parameters.
