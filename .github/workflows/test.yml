@@ -2,11 +2,8 @@ name: Test Suite
 
 on:
   workflow_dispatch:
-  # push:
-  # pull_request:
-
-env:
-  FOUNDRY_PROFILE: ci
+  push:
+  pull_request:
 
 jobs:
   test:
@@ -22,6 +19,7 @@ jobs:
         with:
           version: stable
 
+      # Fails if SuretyHook exceeds the 24,576-byte deploy limit (EIP-170).
       - name: Build
         run: |
           forge --version
