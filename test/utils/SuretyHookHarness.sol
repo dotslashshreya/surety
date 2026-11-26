@@ -42,6 +42,16 @@ contract SuretyHookHarness is SuretyHook {
         return _nav(sqrtP);
     }
 
+    /// @dev Where the TWAP observation ring is: newest slot and how many slots are filled.
+    function twapRing() external view returns (uint16 index, uint16 count) {
+        return (twap.index, twap.count);
+    }
+
+    /// @dev Test-only: lower the per-call settle reward cap to exercise it.
+    function setMaxSettleReward(uint256 cap) external {
+        config.maxSettleReward = cap;
+    }
+
     function pendingShift() external view returns (uint8 from, uint8 to) {
         return (shiftFrom, shiftTo);
     }

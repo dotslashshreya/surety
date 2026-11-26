@@ -1,9 +1,9 @@
 {
-  "settle_enforceAndReallocate": "591141",
-  "swap_breakerCheckSkipped": "150547",
-  "swap_breakerFullCheck_noTrip": "290328",
-  "swap_breakerGateSkips": "176874",
+  "settle_enforceAndReallocate": "591163",
+  "swap_breakerCheckSkipped": "150613",
+  "swap_breakerFullCheck_noTrip": "290394",
+  "swap_breakerGateSkips": "176940",
   "swap_noHook_baseline": "121167",
-  "swap_runsEpochEnforcement": "571213",
-  "swap_tripsBreaker": "437432"
+  "swap_runsEpochEnforcement": "571279",
+  "swap_tripsBreaker": "437498"
 }

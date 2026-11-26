@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {Vm} from "forge-std/Vm.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {SuretyBase} from "./utils/SuretyBase.sol";
@@ -142,7 +141,7 @@ contract SuretySettlementTest is SuretyBase {
         _bootstrap();
         _warpToEpochEnd();
         _swap(true, 150 ether); // enforcement runs, then spot jumps far from the 5-minute TWAP
-        vm.expectRevert();
+        vm.expectRevert(SuretyHook.SpotDeviation.selector);
         hook.settle();
     }
 
@@ -166,11 +165,4 @@ contract SuretySettlementTest is SuretyBase {
         assertLe(bondC, 20 ether);
     }
 
-    function _sawEvent(bytes32 sig) internal returns (bool) {
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        for (uint256 i; i < logs.length; i++) {
-            if (logs[i].topics.length > 0 && logs[i].topics[0] == sig) return true;
-        }
-        return false;
-    }
 }

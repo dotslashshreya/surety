@@ -51,16 +51,21 @@ Queued deposits are priced at the 5-minute TWAP when `settle()` processes them, 
 
 ## Tests
 
-62 tests, all passing (`forge test`):
+112 tests, all passing (`forge test`), with 99% line, 96% branch and 100% function coverage of `src/`:
 
 | Suite | What it shows |
 |---|---|
-| `ScoreLib.t.sol` | Benchmark maths against a hand calculation and against a real full-range position |
+| `ScoreLib.t.sol` | Benchmark maths against a hand calculation, and fuzzed against a real full-range position at any two prices from e^-10 to e^10 |
+| `TwapLib.t.sol` | TWAP rounding, interpolation, the 128-slot ring wrapping around, windows longer than the history; fuzzed: any mean lies between the lowest and highest tick held |
 | `SuretyVault.t.sol` | Vault core, queues, curators, guardrails, capital cap, exit and bond lock |
 | `SuretySettlement.t.sol` | TWAP, in-swap enforcement, slashing, performance fees, reallocation, settle reward |
 | `SuretyBreaker.t.sol` | Shock alone doesn't freeze (TWAP lag); exact 5% threshold; 12 s throttle; price-movement gate; freeze, then slash, then re-arm; anchor keeps the pool liquid with every curator frozen |
 | `SuretyAttacks.t.sol` | Each attack ends with the attacker no better off (see below) |
-| `SuretyFuzz.t.sol` | Deposit then withdraw never returns more than went in; any range move is value-neutral |
+| `SuretyFuzz.t.sol` | Deposit then withdraw never returns more than went in, at price 1 and after a move; any range move is value-neutral; any (tickLower, tickUpper) succeeds or reverts exactly as the guardrails say |
+| `SuretyAccess.t.sol` | Failure paths: only the hook can mint, burn or move shares; only the PoolManager can call the hook's callbacks and `unlockCallback`; no liquidity from outside; zero amounts, missing approvals and balances; claiming twice pays once |
+| `SuretyFlows.t.sol` | `topUpBond`, exact-output swaps, the last depositor leaving, a freed curator slot reused |
+| `SuretyEvents.t.sol` | All 13 events the frontend reads, with their indexed fields and exact data where it's known |
+| `SuretyBoundaries.t.sol` | The TWAP ring wrapping inside the hook, one second before epoch end, guardrail limits (centre distance, usable ticks, exact minimum width), the rebalance counter reset, the settle-reward cap, a one-token reserve |
 | `SuretyInvariant.t.sol` | 7 invariants over 7,680 random actions per run (deposits, withdrawals, claims, swaps, time, range moves, settlements) |
 | `SuretyGas.t.sol` | The gas table below |
 
@@ -86,17 +91,17 @@ Queued deposits are priced at the 5-minute TWAP when `settle()` processes them, 
 
 ## Gas
 
-Each figure is the gas of one call, measured cold as in a real transaction. The baseline is the same swap through an identical pool with no hook.
+Each figure is the gas of one call, measured cold as in a real transaction. The baseline is the same swap through an identical pool with no hook. The tests run on a harness that adds read-only test helpers to the hook; its longer function table adds well under 100 gas per call compared with the deployed hook.
 
 | Path | Gas | How often |
 |---|---|---|
 | Swap, no hook (baseline) | 121,167 | — |
-| **Swap, breaker check skipped** | **150,547** | almost every swap |
-| Swap at the 12 s check, quiet market (gate skips the valuation) | 176,874 | at most once every 12 s |
-| Swap that runs the full breaker check | 290,328 | after a move of 0.2% or more, or every 5 minutes |
-| Swap that ends an epoch (scoring, slashing, fees) | 571,213 | once per epoch |
-| Swap that trips the breaker | 437,432 | rare |
-| `settle()` with reallocation | 591,141 | once per epoch, paid from slashed bonds |
+| **Swap, breaker check skipped** | **150,613** | almost every swap |
+| Swap at the 12 s check, quiet market (gate skips the valuation) | 176,940 | at most once every 12 s |
+| Swap that runs the full breaker check | 290,394 | after a move of 0.2% or more, or every 5 minutes |
+| Swap that ends an epoch (scoring, slashing, fees) | 571,279 | once per epoch |
+| Swap that trips the breaker | 437,498 | rare |
+| `settle()` with reallocation | 591,163 | once per epoch, paid from slashed bonds |
 
 ## Build and test
 

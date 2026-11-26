@@ -4,35 +4,28 @@ pragma solidity ^0.8.26;
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {ModifyLiquidityParams} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolModifyLiquidityTest} from "@uniswap/v4-core/src/test/PoolModifyLiquidityTest.sol";
 import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 
-import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 import {SuretyBase} from "./utils/SuretyBase.sol";
 import {SuretyHook} from "../src/SuretyHook.sol";
 
 /// @notice M1 + M2: vault core, queues, curators and guardrails.
 contract SuretyVaultTest is SuretyBase {
-    using EasyPosm for IPositionManager;
-
     // ---------------------------------------------------------------- M1
 
     function test_boundToOnePool() public {
         assertTrue(hook.poolBound());
         PoolKey memory other = PoolKey(currency0, currency1, 500, 10, IHooks(address(hook)));
-        vm.expectRevert();
+        vm.expectRevert(_hookError(IHooks.beforeInitialize.selector, SuretyHook.PoolAlreadyBound.selector));
         poolManager.initialize(other, Constants.SQRT_PRICE_1_1);
     }
 
     function test_outsideLiquidityReverts() public {
-        vm.expectRevert();
-        this.mintOutside();
-    }
-
-    function mintOutside() external {
-        positionManager.mint(
-            poolKey, -600, 600, 1 ether, type(uint256).max, type(uint256).max, address(this), vm.getBlockTimestamp(), ""
-        );
+        PoolModifyLiquidityTest router = new PoolModifyLiquidityTest(poolManager);
+        vm.expectRevert(_hookError(IHooks.beforeAddLiquidity.selector, SuretyHook.LiquidityOnlyThroughVault.selector));
+        router.modifyLiquidity(poolKey, ModifyLiquidityParams(-600, 600, 1 ether, 0), "");
     }
 
     function test_depositIsQueuedUntilSettlement() public {

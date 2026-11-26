@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+import {Vm} from "forge-std/Vm.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -142,6 +144,44 @@ abstract contract SuretyBase is BaseTest {
 
     function _tick() internal view returns (int24 tick) {
         (, tick,,) = poolManager.getSlot0(poolId);
+    }
+
+    /// @dev Hold the current price for `secs`, with a tiny swap every 30 s so the TWAP records it.
+    function _hold(uint256 secs) internal {
+        uint256 end = vm.getBlockTimestamp() + secs;
+        bool dir;
+        while (vm.getBlockTimestamp() < end) {
+            vm.warp(vm.getBlockTimestamp() + 30);
+            _swap(dir, 1e12);
+            dir = !dir;
+        }
+    }
+
+    /// @dev Whether an event with this signature was recorded since vm.recordLogs().
+    function _sawEvent(bytes32 sig) internal returns (bool) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].topics.length > 0 && logs[i].topics[0] == sig) return true;
+        }
+        return false;
+    }
+
+    /// @dev The exact revert the PoolManager raises when the hook rejects one of its callbacks with `err`.
+    function _hookError(bytes4 callback, bytes4 err) internal view returns (bytes memory) {
+        return abi.encodeWithSelector(
+            CustomRevert.WrappedError.selector,
+            address(hook),
+            callback,
+            abi.encodeWithSelector(err),
+            abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+        );
+    }
+
+    /// @dev A user holding both tokens but with no approvals given to anyone.
+    function _freshUser(string memory name) internal returns (address u) {
+        u = makeAddr(name);
+        token0.mint(u, 1_000 ether);
+        token1.mint(u, 1_000 ether);
     }
 
     /// @dev Core accounting check: the hook's ERC-6909 claims equal exactly what its books say it holds.

@@ -19,16 +19,6 @@ contract SuretyBreakerTest is SuretyBase {
 
     // ---------------------------------------------------------------- helpers
 
-    /// @dev Hold the current price for `secs`, with a tiny swap every 30 s so the TWAP records it.
-    function _hold(uint256 secs) internal {
-        uint256 end = vm.getBlockTimestamp() + secs;
-        bool dir;
-        while (vm.getBlockTimestamp() < end) {
-            vm.warp(vm.getBlockTimestamp() + 30);
-            _swap(dir, 1e12);
-            dir = !dir;
-        }
-    }
 
     function _shock() internal {
         vm.warp(vm.getBlockTimestamp() + 60);
@@ -295,13 +285,6 @@ contract SuretyBreakerTest is SuretyBase {
 
     // ---------------------------------------------------------------- log helpers
 
-    function _sawEvent(bytes32 sig) internal returns (bool) {
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        for (uint256 i; i < logs.length; i++) {
-            if (logs[i].topics.length > 0 && logs[i].topics[0] == sig) return true;
-        }
-        return false;
-    }
 
     function _scored(address who) internal returns (uint256 v0, uint256 v1, uint256 b) {
         Vm.Log[] memory logs = vm.getRecordedLogs();

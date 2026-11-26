@@ -13,15 +13,6 @@ import {SuretyMath} from "../src/libraries/SuretyMath.sol";
 contract SuretyAttacksTest is SuretyBase {
     // ---------------------------------------------------------------- helpers
 
-    function _hold(uint256 secs) internal {
-        uint256 end = vm.getBlockTimestamp() + secs;
-        bool dir;
-        while (vm.getBlockTimestamp() < end) {
-            vm.warp(vm.getBlockTimestamp() + 30);
-            _swap(dir, 1e12);
-            dir = !dir;
-        }
-    }
 
     function _shortTwapPrice() internal view returns (uint160) {
         return SuretyMath.sqrtAtTick(hook.twapTick(5 minutes));
