@@ -8,7 +8,7 @@ Surety is a Uniswap v4 hook (UHI11) in which curators manage the hook's liquidit
 - Every epoch, each slice is scored against a **full-range LP of the same starting value**. The benchmark is computed onchain from the pool's own fee growth, and both sides are marked at the hook's epoch-long TWAP.
 - **Enforcement runs inside the first swap after an epoch ends.** That covers scoring, slashing and performance fees, and it is bookkeeping only. Reallocation moves liquidity, so it runs from `settle()`, which anyone can call for a reward paid out of slashed bonds. There is no keeper.
 - Settlement never swaps. Liquidity is only added when spot is close to the short TWAP.
-- **Drawdown breaker: freeze, never slash.** Mid-epoch, a slice that falls more than 5% below its benchmark (both marked at the 5-minute TWAP, never spot) is pulled out of the pool and parked. The slash still happens at settlement, at the epoch-long TWAP. The frozen curator's benchmark stops earning fees at the freeze, so a wrongful freeze, even one triggered on purpose by a rival, costs it only the fees it missed. A frozen curator gets no capital until it picks a new range.
+- **Drawdown breaker: freeze, never slash.** Mid-epoch, a slice that falls more than 5% below its benchmark (both marked at the 5-minute TWAP, never spot) is pulled out of the pool and parked. The slash still happens at settlement, at the epoch-long TWAP. The frozen curator's benchmark stops earning fees at the freeze, so a wrongful freeze, even one triggered on purpose by a rival, costs it only the fees it missed. A frozen curator gets no capital until it picks a new range. The check is cheap in a quiet market: at most once every 12 s, and the full valuation runs only when spot has moved 20 ticks (about 0.2%) from the TWAP the last full check used, or 5 minutes have passed. After a shock spot stays far from the old TWAP, so full checks keep running until the TWAP catches up: the gate never delays a freeze.
 - **Full-range anchor.** 10% of depositor capital always sits in the hook's own full-range position, which is literally the benchmark. It is never frozen, so the pool is never empty and moving the price always costs real money. Without it, a pool whose curators are all frozen (or all narrow) could be pushed to any price for free, and `settle()` would redeploy depositors' money at that price.
 
 ## Status
@@ -51,14 +51,14 @@ Queued deposits are priced at the 5-minute TWAP when `settle()` processes them, 
 
 ## Tests
 
-60 tests, all passing (`forge test`):
+62 tests, all passing (`forge test`):
 
 | Suite | What it shows |
 |---|---|
 | `ScoreLib.t.sol` | Benchmark maths against a hand calculation and against a real full-range position |
 | `SuretyVault.t.sol` | Vault core, queues, curators, guardrails, capital cap, exit and bond lock |
 | `SuretySettlement.t.sol` | TWAP, in-swap enforcement, slashing, performance fees, reallocation, settle reward |
-| `SuretyBreaker.t.sol` | Shock alone doesn't freeze (TWAP lag); exact 5% threshold; 12 s throttle; freeze, then slash, then re-arm; anchor keeps the pool liquid with every curator frozen |
+| `SuretyBreaker.t.sol` | Shock alone doesn't freeze (TWAP lag); exact 5% threshold; 12 s throttle; price-movement gate; freeze, then slash, then re-arm; anchor keeps the pool liquid with every curator frozen |
 | `SuretyAttacks.t.sol` | Each attack ends with the attacker no better off (see below) |
 | `SuretyFuzz.t.sol` | Deposit then withdraw never returns more than went in; any range move is value-neutral |
 | `SuretyInvariant.t.sol` | 7 invariants over 7,680 random actions per run (deposits, withdrawals, claims, swaps, time, range moves, settlements) |
@@ -91,11 +91,12 @@ Each figure is the gas of one call, measured cold as in a real transaction. The 
 | Path | Gas | How often |
 |---|---|---|
 | Swap, no hook (baseline) | 121,167 | — |
-| **Swap, breaker check skipped** | **150,503** | almost every swap |
-| Swap that runs the breaker check | 289,781 | at most once every 12 s |
-| Swap that ends an epoch (scoring, slashing, fees) | 570,672 | once per epoch |
-| Swap that trips the breaker | 436,885 | rare |
-| `settle()` with reallocation | 591,119 | once per epoch, paid from slashed bonds |
+| **Swap, breaker check skipped** | **150,547** | almost every swap |
+| Swap at the 12 s check, quiet market (gate skips the valuation) | 176,874 | at most once every 12 s |
+| Swap that runs the full breaker check | 290,328 | after a move of 0.2% or more, or every 5 minutes |
+| Swap that ends an epoch (scoring, slashing, fees) | 571,213 | once per epoch |
+| Swap that trips the breaker | 437,432 | rare |
+| `settle()` with reallocation | 591,141 | once per epoch, paid from slashed bonds |
 
 ## Build and test
 

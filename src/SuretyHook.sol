@@ -115,6 +115,11 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
     uint256 internal constant BPS = 10_000;
     /// @dev Capital only shifts when the gap in excess return exceeds 1 part per million, so rounding dust can't move it.
     int256 internal constant SHIFT_THRESHOLD = 1e12;
+    /// @dev Breaker gate: run the full valuation only when spot is at least this many ticks (about 0.2%) away from the
+    ///      TWAP tick the last full check used...
+    int24 internal constant BREAKER_TICK_GATE = 20;
+    /// @dev ...or when this long has passed since it, which covers slow drift from fees alone.
+    uint32 internal constant BREAKER_MAX_AGE = 5 minutes;
 
     Config internal config;
     SuretyShares public immutable shares;
@@ -137,7 +142,9 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
     bool public reallocPending;
     uint8 internal shiftFrom = NONE;
     uint8 internal shiftTo = NONE;
-    uint32 public lastBreakerCheck;
+    uint32 public lastBreakerCheck; // last time the 12 s throttle let a swap look at the breaker
+    uint32 public lastFullCheck; // last time every slice was actually valued
+    int24 internal lastCheckedTick; // the TWAP tick that full check used
 
     // Vault balances (ERC-6909 claims held by the hook)
     uint256 public reserve0; // depositor capital not allocated to any slice, incl. slashed bonds
@@ -273,10 +280,17 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
     {
         (, int24 tick,,) = poolManager.getSlot0(_poolId());
         twap.update(tick);
-        // Throttled: the short TWAP barely moves within a few seconds, so most swaps skip the check entirely.
+        // Two cheap filters before the expensive valuation:
+        // 1. Throttle: at most once per breakerInterval (the short TWAP barely moves within a few seconds).
+        // 2. Gate: only if spot has moved away from the TWAP the last full check used, or that check is old. After a
+        //    shock, spot stays far from the old TWAP, so full checks keep running until the TWAP catches up and the
+        //    breaker can trip: the gate never delays a freeze. In a quiet market it skips the valuation entirely.
         if (block.timestamp >= uint256(lastBreakerCheck) + config.breakerInterval) {
             lastBreakerCheck = uint32(block.timestamp);
-            _checkBreaker();
+            int24 moved = tick > lastCheckedTick ? tick - lastCheckedTick : lastCheckedTick - tick;
+            if (moved >= BREAKER_TICK_GATE || block.timestamp >= uint256(lastFullCheck) + BREAKER_MAX_AGE) {
+                _checkBreaker();
+            }
         }
         return (BaseHook.afterSwap.selector, 0);
     }
@@ -290,7 +304,10 @@ contract SuretyHook is BaseHook, IUnlockCallback, ReentrancyGuard {
     ///      here, because mid-epoch prices can be pushed around. The slash comes at settlement, at the epoch-long TWAP.
     ///      Runs inside afterSwap, where the PoolManager is already unlocked, so liquidity can be removed directly.
     function _checkBreaker() internal {
-        uint160 sqrtNow = SuretyMath.sqrtAtTick(twap.meanTick(config.shortTwapWindow));
+        int24 twapTick_ = twap.meanTick(config.shortTwapWindow);
+        lastCheckedTick = twapTick_;
+        lastFullCheck = uint32(block.timestamp);
+        uint160 sqrtNow = SuretyMath.sqrtAtTick(twapTick_);
         (uint256 fg0, uint256 fg1) = poolManager.getFeeGrowthGlobals(_poolId());
         bool froze;
         for (uint8 i; i < MAX_CURATORS; i++) {

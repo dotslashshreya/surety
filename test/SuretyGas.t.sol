@@ -64,11 +64,21 @@ contract SuretyGasTest is SuretyBase {
         vm.snapshotGasLastCall("surety-gas", "swap_breakerCheckSkipped");
     }
 
-    /// At most once every 12 s: the swap also values every slice against its benchmark.
-    function test_gas_swap_breakerChecked() public {
+    /// Every 12 s in a quiet market: the throttle lets the swap look, but spot is still within 20 ticks of the TWAP the
+    /// last full check used, so the gate skips the valuation.
+    function test_gas_swap_breakerGateSkips() public {
         vm.warp(vm.getBlockTimestamp() + 13);
         _swapOn(poolKey, false);
-        vm.snapshotGasLastCall("surety-gas", "swap_breakerCheckRuns_noTrip");
+        vm.snapshotGasLastCall("surety-gas", "swap_breakerGateSkips");
+        assertLt(hook.lastFullCheck(), vm.getBlockTimestamp(), "no full check");
+    }
+
+    /// When the price has moved, or 5 minutes after the last one: the swap values every slice against its benchmark.
+    function test_gas_swap_breakerFullCheck() public {
+        vm.warp(vm.getBlockTimestamp() + 5 minutes + 1);
+        _swapOn(poolKey, false);
+        vm.snapshotGasLastCall("surety-gas", "swap_breakerFullCheck_noTrip");
+        assertEq(hook.lastFullCheck(), vm.getBlockTimestamp(), "full check ran");
     }
 
     /// Once per epoch: the first swap after it ends scores, slashes and pays fees (plus a breaker check).
@@ -83,7 +93,7 @@ contract SuretyGasTest is SuretyBase {
         (uint256 v,) = hook.liveScore(1);
         hook.setV0(1, v * 10_000 / 9_000); // 10% behind its benchmark
         vm.cool(address(hook));
-        vm.warp(vm.getBlockTimestamp() + 13);
+        vm.warp(vm.getBlockTimestamp() + 5 minutes + 1);
         _swapOn(poolKey, false);
         vm.snapshotGasLastCall("surety-gas", "swap_tripsBreaker");
         assertTrue(hook.curatorAt(1).frozen);

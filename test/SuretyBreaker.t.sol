@@ -78,17 +78,17 @@ contract SuretyBreakerTest is SuretyBase {
     /// Trip exactly at X = 5%: 4.9% below the benchmark stays live, 5.1% freezes.
     function test_threshold() public {
         _bootstrap();
-        vm.warp(vm.getBlockTimestamp() + 13);
+        vm.warp(vm.getBlockTimestamp() + 5 minutes + 1); // past the gate's max age: the full check runs
         _swap(true, 1e9); // checkpoint; no meaningful price move
         (uint256 v,) = hook.liveScore(RECKLESS);
 
         hook.setV0(RECKLESS, v * 10_000 / 9_510); // benchmark ≈ v0 at an unchanged price: 4.9% shortfall
-        vm.warp(vm.getBlockTimestamp() + 13);
+        vm.warp(vm.getBlockTimestamp() + 5 minutes + 1); // past the gate's max age: the full check runs
         _swap(false, 1e9);
         assertFalse(_frozen(RECKLESS), "4.9% below: still live");
 
         hook.setV0(RECKLESS, v * 10_000 / 9_490); // 5.1% shortfall
-        vm.warp(vm.getBlockTimestamp() + 13);
+        vm.warp(vm.getBlockTimestamp() + 5 minutes + 1); // past the gate's max age: the full check runs
         _swap(true, 1e9);
         assertTrue(_frozen(RECKLESS), "5.1% below: frozen");
     }
@@ -217,6 +217,41 @@ contract SuretyBreakerTest is SuretyBase {
         _assertClaimsMatch();
     }
 
+    /// The gas gate: in a quiet market the 12 s check skips the valuation; after a move it keeps running every 12 s
+    /// until the TWAP catches up (so it never delays a freeze); then it skips again; after 5 minutes it runs regardless.
+    function test_gate_quietSkips_moveKeepsChecking_ageForcesCheck() public {
+        _bootstrap();
+        vm.warp(vm.getBlockTimestamp() + 60);
+        _swap(true, 1e12);
+        uint32 first = hook.lastFullCheck();
+        assertEq(first, vm.getBlockTimestamp(), "first check runs (nothing checked yet)");
+
+        vm.warp(vm.getBlockTimestamp() + 13);
+        _swap(false, 1e12);
+        assertEq(hook.lastBreakerCheck(), vm.getBlockTimestamp(), "the throttle let this swap look");
+        assertEq(hook.lastFullCheck(), first, "quiet market: the gate skipped the valuation");
+
+        int24 before = _tick();
+        vm.warp(vm.getBlockTimestamp() + 13);
+        _swap(true, 10 ether);
+        assertGe(before - _tick(), 20, "the price moved at least 20 ticks");
+        assertEq(hook.lastFullCheck(), vm.getBlockTimestamp(), "a move passes the gate");
+
+        vm.warp(vm.getBlockTimestamp() + 13);
+        _swap(false, 1e12);
+        assertEq(hook.lastFullCheck(), vm.getBlockTimestamp(), "TWAP still lagging spot: checks keep running");
+
+        _hold(6 minutes); // the TWAP catches up with spot
+        vm.warp(vm.getBlockTimestamp() + 13);
+        _swap(true, 1e12);
+        uint32 settled = hook.lastFullCheck();
+        assertLt(settled, vm.getBlockTimestamp(), "TWAP caught up, price quiet again: skipped");
+
+        vm.warp(uint256(settled) + 5 minutes + 1);
+        _swap(false, 1e12);
+        assertEq(hook.lastFullCheck(), vm.getBlockTimestamp(), "5 minutes since the last full check: runs anyway");
+    }
+
     /// The anchor keeps about 10% of depositor capital full range, outside every curator's control.
     function test_anchorHoldsTenPercent() public {
         _bootstrap();
@@ -232,13 +267,13 @@ contract SuretyBreakerTest is SuretyBase {
     /// so nobody can set a fake price for free and have settle() redeploy depositors' money at it.
     function test_allCuratorsFrozen_poolStillHasLiquidity() public {
         _bootstrap();
-        vm.warp(vm.getBlockTimestamp() + 13);
+        vm.warp(vm.getBlockTimestamp() + 5 minutes + 1); // past the gate's max age: the full check runs
         _swap(true, 1e9);
         (uint256 vc,) = hook.liveScore(CAREFUL);
         (uint256 vr,) = hook.liveScore(RECKLESS);
         hook.setV0(CAREFUL, vc * 2); // both far below their benchmarks
         hook.setV0(RECKLESS, vr * 2);
-        vm.warp(vm.getBlockTimestamp() + 13);
+        vm.warp(vm.getBlockTimestamp() + 5 minutes + 1); // past the gate's max age: the full check runs
         _swap(false, 1e9);
         assertTrue(_frozen(CAREFUL) && _frozen(RECKLESS), "every curator frozen");
         assertEq(hook.curatorAt(CAREFUL).liquidity + hook.curatorAt(RECKLESS).liquidity, 0);
