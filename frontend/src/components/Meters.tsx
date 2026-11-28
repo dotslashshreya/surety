@@ -1,5 +1,6 @@
 import { PARAMS } from "../model/engine";
 import { pct, usd } from "../model/format";
+import { useCountTo } from "./useCountTo";
 
 const SCALE = 0.12; // the meter reads 0–12% behind
 
@@ -39,6 +40,9 @@ export function BehindMeter({ behind, frozen, idle }: { behind: number; frozen: 
 export function BondMeter({ bond, bondStart, lastSlash }: { bond: number; bondStart: number; lastSlash: number }) {
   const left = bondStart > 0 ? bond / bondStart : 0;
   const slashed = bondStart > 0 ? Math.min(lastSlash, bondStart - bond) / bondStart : 0;
+  // The slash: the number counts down with the bar instead of jumping, in red while it drops.
+  const [shown, moving] = useCountTo(bond);
+  const dropping = moving && shown > bond;
   return (
     <figure className="meter-wrap">
       <div
@@ -56,7 +60,7 @@ export function BondMeter({ bond, bondStart, lastSlash }: { bond: number; bondSt
         )}
       </div>
       <figcaption className="reading">
-        <span className="reading-value">{usd(bond)}</span>
+        <span className={`reading-value${dropping ? " reading-value--dropping" : ""}`}>{usd(shown)}</span>
         <span className="reading-label">bond of {usd(bondStart)}</span>
       </figcaption>
     </figure>

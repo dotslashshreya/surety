@@ -1,6 +1,7 @@
 import { epochEnded, nav, sharePrice } from "../model/engine";
 import { clock, countdown, usd } from "../model/format";
 import type { Sim } from "../model/types";
+import { PriceTrace } from "./PriceTrace";
 
 export function Header({ sim, speed }: { sim: Sim; speed: number }) {
   const end = sim.epoch.start + sim.epoch.length;
@@ -12,9 +13,12 @@ export function Header({ sim, speed }: { sim: Sim; speed: number }) {
         <p className="pitch">The first LP manager who pays you back when they lose.</p>
       </div>
       <dl className="readouts">
-        <div>
+        <div className="price-readout">
           <dt>mETH price</dt>
-          <dd>{usd(sim.price)}</dd>
+          <dd>
+            {usd(sim.price)}
+            <PriceTrace sim={sim} />
+          </dd>
         </div>
         <div>
           <dt>Epoch {sim.scored ? sim.epoch.id - 1 : sim.epoch.id}</dt>
