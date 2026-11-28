@@ -34,6 +34,8 @@ src/libraries/SuretyMath.sol  linked library: tick maths, position valuation, be
                             (keeps SuretyHook under the 24 KB deploy limit)
 test/                       see "Tests" below
 snapshots/surety-gas.json   gas figures behind the table below
+src/demo/                   test tokens (mETH, mUSDC) and their capped faucet
+script/                     DeploySurety, RegisterCurator, local.sh
 frontend/                   the dashboard (Vite + React), currently on simulated data
 audit/README.md             Slither results: what was fixed, and why the rest isn't a problem
 ```
@@ -103,6 +105,19 @@ Each figure is the gas of one call, measured cold as in a real transaction. The 
 | Swap that ends an epoch (scoring, slashing, fees) | 571,279 | once per epoch |
 | Swap that trips the breaker | 437,498 | rare |
 | `settle()` with reallocation | 591,163 | once per epoch, paid from slashed bonds |
+
+## Run it locally
+
+With [Foundry](https://book.getfoundry.sh/) installed:
+
+```bash
+anvil                # in one terminal: a local chain
+script/local.sh      # in another: deploy, register two curators, run the first settlement
+```
+
+`script/local.sh` deploys Uniswap v4, the mETH/mUSDC test tokens and their faucet, and the hook at a mined address (its last 14 bits encode its permissions; the `SuretyMath` library is deployed and linked first). It then opens the pool at about 3,000 mUSDC per mETH, seeds about $200,000, registers a careful (wide range) and a reckless (narrow range) curator, fast-forwards past epoch 1 and settles. Addresses are written to `deployments/31337.json`. It uses Anvil's default test accounts, which exist only on a local chain.
+
+The faucet gives 1 mETH and 3,000 mUSDC per address per day, and only the faucet can mint, so the cap can't be bypassed from a block explorer.
 
 ## Dashboard
 
