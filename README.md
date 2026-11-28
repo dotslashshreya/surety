@@ -34,6 +34,7 @@ src/libraries/SuretyMath.sol  linked library: tick maths, position valuation, be
                             (keeps SuretyHook under the 24 KB deploy limit)
 test/                       see "Tests" below
 snapshots/surety-gas.json   gas figures behind the table below
+frontend/                   the dashboard (Vite + React), currently on simulated data
 audit/README.md             Slither results: what was fixed, and why the rest isn't a problem
 ```
 
@@ -102,6 +103,16 @@ Each figure is the gas of one call, measured cold as in a real transaction. The 
 | Swap that ends an epoch (scoring, slashing, fees) | 571,279 | once per epoch |
 | Swap that trips the breaker | 437,498 | rare |
 | `settle()` with reallocation | 591,163 | once per epoch, paid from slashed bonds |
+
+## Dashboard
+
+`frontend/` is the dashboard: one meter per curator showing how far it is behind its benchmark (breaker at 5%, bond used up at 10%), its bond beside it, an event log, and the depositor flow. Until it's wired to the chain it runs a simulation that follows the contract's rules, with demo controls for the price shock and the end of an epoch.
+
+```bash
+cd frontend && npm install && npm run dev
+```
+
+`npm test` runs its unit tests (the liquidity maths, the simulation, the depositor steps). On Windows machines where Application Control blocks unsigned native binaries, Rollup's WebAssembly build is used instead (see `overrides` in `frontend/package.json`).
 
 ## Build and test
 
