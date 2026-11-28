@@ -112,7 +112,7 @@ Each figure is the gas of one call, measured cold as in a real transaction. The 
 cd frontend && npm install && npm run dev
 ```
 
-`npm test` runs its unit tests (the liquidity maths, the simulation, the depositor steps). On Windows machines where Application Control blocks unsigned native binaries, Rollup's WebAssembly build is used instead (see `overrides` in `frontend/package.json`).
+`npm test` runs its unit tests (the liquidity maths, the simulation, the depositor steps). CI runs them, plus the type-check and production build, on every push alongside the contract tests. On Windows machines where Application Control blocks unsigned native binaries, Rollup's WebAssembly build is used instead (see `overrides` in `frontend/package.json`).
 
 ## Build and test
 
